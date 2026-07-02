@@ -33,6 +33,7 @@ export type {
   TrackConfig,
   TrackResult,
   TerminalOutcome,
+  ConfirmationPath,
   ConfirmationDeps,
   SignatureSubscriptionsApi,
   ConfirmationEndpoint,
