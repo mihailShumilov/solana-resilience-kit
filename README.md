@@ -13,7 +13,7 @@ A vendor-neutral, **client-side resilience and observability layer for Solana dA
 - **Vendor-neutral** — works with any RPC provider; no gateway, no proprietary key required.
 - **Correct by construction** — implements the send/confirm semantics most clients get wrong (no double-charge, bounded by `lastValidBlockHeight`).
 - **Built on `@solana/kit`** — the pool *is* a kit `RpcTransport`, so it drops into existing kit code.
-- **Deterministically tested** — an in-memory fault-injection cluster reproduces drops, expiry, 429s, desync, and MEV failures; 157 specs across 30 files, coverage-gated.
+- **Deterministically tested** — an in-memory fault-injection cluster reproduces drops, expiry, 429s, desync, and MEV failures; 172 specs across 33 files, coverage-gated.
 - **Observable & UI-ready** — first-class client telemetry to OpenTelemetry / Datadog, plus a typed, browser-safe lifecycle event stream for dApp UIs.
 
 ## Table of contents
@@ -241,14 +241,14 @@ pool.health();   // EndpointHealth[]: { name, healthy, slot, latencyMs, errorRat
 | `commitment` | `"confirmed" \| "finalized"` | `"confirmed"` | Confirmation target. |
 | `txId` | `string` | `signature` | Stable id for lifecycle events. |
 
-**`SenderDeps`** accepts `sleep` (injected for deterministic tests), `metrics`, `events`, and `clusterGuard` (see [Cluster guard](#cluster-guard-wrong-network-protection)). `sendAndConfirm` returns `SendResult { signature, outcome, slot, rebroadcasts }` where `outcome` is `"confirmed" | "failed" | "expired"`.
+**`SenderDeps`** accepts `sleep` (injected for deterministic tests), `metrics`, `events`, `clusterGuard` (see [Cluster guard](#cluster-guard-wrong-network-protection)), and `subscriptions` — a kit/v2 subscriptions transport passed through to the internal `ConfirmationTracker` so every confirmation races the [WebSocket fast-path](#confirmation-multi-endpoint-fan-out--websocket-fast-path). `sendAndConfirm` returns `SendResult { signature, outcome, slot, rebroadcasts }` where `outcome` is `"confirmed" | "failed" | "expired"`.
 
 ### Confirmation: multi-endpoint fan-out + WebSocket fast-path
 
 `ConfirmationTracker` polls a signature to a terminal outcome using the canonical rule (block height vs `lastValidBlockHeight`). Two optional accelerators, both **regression-free** — they can only resolve *earlier*, never extend the loop or override expiry:
 
 - **Multi-endpoint fan-out** (`multiEndpoint`) — polls status across the top-K freshest healthy endpoints (ranked by a shared `HealthMonitor`). A definitive on-chain error from *any* node fails fast; a `confirmed` from *any* node wins; dead endpoints are tolerated. This beats the "status withheld by a lagging node" failure class.
-- **WebSocket fast-path** (`subscriptions`) — a `signatureNotifications` subscription races the poll loop and resolves on whichever fires first. Any subscription error or close silently falls back to pure polling.
+- **WebSocket fast-path** (`subscriptions`) — a `signatureNotifications` subscription races the poll loop and resolves on whichever fires first. Any subscription error or close silently falls back to pure polling — and emits a `transaction:ws-fallback` lifecycle event so the disconnect is observable, not silent.
 
 ```ts
 import { ConfirmationTracker } from "solana-resilience-kit";
@@ -263,7 +263,9 @@ const tracker = new ConfirmationTracker(primaryRpc, {
 });
 
 const res = await tracker.track({ signature, lastValidBlockHeight });
-// TrackResult { signature, outcome, slot, polls, err? }
+// TrackResult { signature, outcome, slot, polls, via, err? }
+// via: "ws" | "poll" — which racer delivered the outcome, so you can measure
+// the WS latency benefit and the polling fallback rate. Expiry is always "poll".
 ```
 
 ### Cluster guard (wrong-network protection)
@@ -356,7 +358,9 @@ Patterns are ordered most-specific-first (e.g. slippage is checked before insuff
 import { LifecycleEmitter, ResilientRpcPool, TransactionSender } from "solana-resilience-kit";
 
 const events = new LifecycleEmitter();
-const off = events.on("transaction:confirmed", ({ slot }) => render(`landed in slot ${slot}`));
+const off = events.on("transaction:confirmed", ({ slot, via }) =>
+  render(`landed in slot ${slot} (via ${via})`)); // via: "ws" | "poll"
+events.on("transaction:ws-fallback", ({ reason }) => render(`WS dropped: ${reason}`));
 events.on("connection:failover", ({ from, to }) => render(`${from} → ${to}`));
 
 const pool = new ResilientRpcPool({ endpoints, events });
@@ -364,7 +368,7 @@ const sender = new TransactionSender(pool.rpc(), { events });
 // off();  // every on()/once() returns an unsubscribe function
 ```
 
-Event keys: `transaction:pending` · `transaction:simulated` · `transaction:sent` · `transaction:confirmed` (`+ slot`) · `transaction:failed` (`+ err`) · `transaction:expired`; `connection:failover` (`from`, `to`, `reason`) · `connection:health` (`endpoint`, `healthy`, `slot`) · `connection:cluster-detected` (`cluster`, `genesisHash`) · `connection:cluster-mismatch` (`expected`, `actual`, `genesisHash`).
+Event keys: `transaction:pending` · `transaction:simulated` · `transaction:sent` · `transaction:confirmed` (`+ slot`, `via`) · `transaction:failed` (`+ err`, `via`) · `transaction:expired` · `transaction:ws-fallback` (`signature`, `reason` — the confirmation WebSocket errored or closed and the tracker fell back to polling; losing the race to a faster poll is *not* a fallback); `connection:failover` (`from`, `to`, `reason`) · `connection:health` (`endpoint`, `healthy`, `slot`) · `connection:cluster-detected` (`cluster`, `genesisHash`) · `connection:cluster-mismatch` (`expected`, `actual`, `genesisHash`).
 
 ### Wallet-adapter bridge + React hook
 
@@ -458,11 +462,13 @@ The SDK emits a small, fixed set of client-side instruments:
 | Instrument | Type | Attributes | Emitted when |
 |---|---|---|---|
 | `rpc.request.latency_ms` | histogram | `endpoint`, `method`, `ok` | every RPC request attempt (per endpoint) |
-| `rpc.request.failures` | counter | `endpoint`, `method` | a request attempt fails |
-| `rpc.rate_limited` | counter | `endpoint` | an attempt is rejected with HTTP 429 |
+| `rpc.request.failures` | counter | `endpoint`, `method` | a request attempt fails — including a failed freshness probe |
+| `rpc.rate_limited` | counter | `endpoint` | an attempt (real request or freshness probe) is rejected with HTTP 429 |
 | `tx.rebroadcasts` | counter | `signature` | the sender rebroadcasts the signed transaction |
-| `tx.landings` | counter | `signature`, `outcome`, `slots` | a transaction reaches a terminal outcome (`confirmed` / `expired`) |
+| `tx.landings` | counter | `signature`, `outcome`, `slots`, `via` | a transaction reaches a terminal outcome (`confirmed` / `expired`) |
 | `rpc.endpoint.slot` | gauge | `endpoint` | a `getSlot` response is observed (slot-lag dashboards) |
+
+Two details that keep dashboards honest: **probe-detected degradation is not invisible** — when freshness routing probes an endpoint, finds it failing, and routes real traffic away from it, the failed probes still feed `rpc.request.failures` / `rpc.rate_limited` (successful probes stay out of the counters so synthetic traffic never inflates success rates). And **confirmations are path-attributed** — `tx.landings` carries `via: "ws" | "poll"`, so combined with the WS fast-path you can chart the actual latency benefit and the polling fallback rate.
 
 A runnable end-to-end demo is in [`examples/otel-setup.ts`](./examples/otel-setup.ts): `npm run example:otel` wires `OtelMetrics` into a pool + sender, drives simulated sends against the harness, and exports all six instruments — with a console exporter attached so you see every data point even without a collector running.
 

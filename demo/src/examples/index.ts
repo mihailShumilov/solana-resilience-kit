@@ -123,7 +123,7 @@ export const EXAMPLES: Example[] = [
     title: "Multi-endpoint + WebSocket confirm",
     tag: "tx · confirmation",
     description:
-      "A lagging node can withhold a signature status. ConfirmationTracker fans status polling across the freshest healthy endpoints (any node's definitive result wins, dead nodes tolerated) and races a signatureNotifications WebSocket fast-path — while the poll loop stays the sole authority for expiry.",
+      "A lagging node can withhold a signature status. ConfirmationTracker fans status polling across the freshest healthy endpoints (any node's definitive result wins, dead nodes tolerated) and races a signatureNotifications WebSocket fast-path — while the poll loop stays the sole authority for expiry. Every outcome reports via: \"ws\" | \"poll\", so the WS latency benefit is measurable.",
     code: multiEndpointConfirmSrc,
     run: multiEndpointConfirm,
   },
@@ -132,7 +132,7 @@ export const EXAMPLES: Example[] = [
     title: "Lifecycle events",
     tag: "events · UI",
     description:
-      "The SDK emits the same internal signals to a typed, browser-safe LifecycleEmitter (for UIs) that it reports to OpenTelemetry (for infra). Subscribe once and render live pending → sent → confirmed plus failover/health — a throwing listener is isolated from the send path.",
+      "The SDK emits the same internal signals to a typed, browser-safe LifecycleEmitter (for UIs) that it reports to OpenTelemetry (for infra). Subscribe once and render live pending → sent → confirmed (with via: ws | poll path attribution) plus failover, health, and ws-fallback — a throwing listener is isolated from the send path.",
     code: lifecycleEventsSrc,
     run: lifecycleEvents,
   },

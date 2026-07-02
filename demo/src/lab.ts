@@ -696,10 +696,14 @@ export class Lab {
     e.on("transaction:pending", () => this.line("event · transaction:pending", "muted"));
     e.on("transaction:sent", () => this.line("event · transaction:sent", "muted"));
     e.on("transaction:confirmed", (p) =>
-      this.line(`event · transaction:confirmed${p.slot != null ? ` · slot ${Number(p.slot)}` : ""}`, "muted"),
+      this.line(
+        `event · transaction:confirmed${p.slot != null ? ` · slot ${Number(p.slot)}` : ""}${p.via !== undefined ? ` · via ${p.via}` : ""}`,
+        "muted",
+      ),
     );
     e.on("transaction:failed", () => this.line("event · transaction:failed", "muted"));
     e.on("transaction:expired", () => this.line("event · transaction:expired", "muted"));
+    e.on("transaction:ws-fallback", (p) => this.line(`event · transaction:ws-fallback · ${p.reason}`, "muted"));
     e.on("connection:failover", (p) => this.line(`event · connection:failover · ${p.from}→${p.to}`, "muted"));
     e.on("connection:health", (p) => this.line(`event · connection:health · ${p.endpoint} healthy=${p.healthy}`, "muted"));
     e.on("connection:cluster-detected", (p) => this.line(`event · cluster-detected · ${p.cluster}`, "muted"));
