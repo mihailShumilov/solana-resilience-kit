@@ -5,7 +5,10 @@
  * latency, drops, 429s, and slot lag. This is what lets us simulate an
  * "unhealthy RPC pool" — e.g. one advanced node and one lagging node.
  */
-import type { RpcTransport } from "@solana/rpc-spec";
+// Type-identical to @solana/rpc-spec's RpcTransport (kit re-exports it), but
+// this file ships as the `./testing` subpath, so its d.ts must only reference
+// the peer `@solana/kit` (issue #8).
+import type { RpcTransport } from "@solana/kit";
 import { MockCluster } from "./mock-cluster.js";
 import { type EndpointFaultProfile, HttpTransportError, TransportDroppedError } from "./faults.js";
 import { type Rng, makeRng, chance, randInt } from "./rng.js";

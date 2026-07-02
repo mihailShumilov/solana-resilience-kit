@@ -163,6 +163,8 @@ const rpc = pool.rpc();                 // a normal @solana/kit RPC, failover un
 const slot = await rpc.getSlot().send();
 ```
 
+To type the endpoints array yourself, import `RpcTransport` from this package (`import type { RpcTransport } from "solana-resilience-kit"`) or from `@solana/kit` — never from `@solana/rpc-spec`, which is not a dependency your package manager is guaranteed to resolve (pnpm's strict node-linker rejects it).
+
 Send a signed transaction with correct confirmation semantics:
 
 ```ts
