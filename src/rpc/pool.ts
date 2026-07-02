@@ -10,8 +10,10 @@
  * `pool.rpc()` and use it exactly like any kit RPC — that is the web3.js-v2
  * compatibility guarantee plus DX win.
  */
-import type { RpcTransport } from "@solana/rpc-spec";
-import { createSolanaRpcFromTransport, type Rpc, type SolanaRpcApi } from "@solana/kit";
+// Import from the peer `@solana/kit` (which re-exports @solana/rpc-spec) so the
+// emitted d.ts never references a package consumers can't resolve under pnpm's
+// strict node-linker (issue #8).
+import { createSolanaRpcFromTransport, type Rpc, type RpcTransport, type SolanaRpcApi } from "@solana/kit";
 import { AllEndpointsFailedError } from "../errors.js";
 import { HealthMonitor, type EndpointHealth } from "./health.js";
 import type { CreditRateLimiter } from "./rate-limit.js";

@@ -14,6 +14,10 @@ export type { ErrorCode, ErrorCategory, TranslateContext } from "./error-transla
 // RPC layer
 export { ResilientRpcPool } from "./rpc/pool.js";
 export type { ResilientEndpoint, ResilientRpcConfig } from "./rpc/pool.js";
+// Stable public path for the transport type used in `ResilientEndpoint`, so
+// consumers never import from `@solana/rpc-spec` (unresolvable under pnpm's
+// strict node-linker; issue #8).
+export type { RpcTransport } from "@solana/kit";
 export { HealthMonitor } from "./rpc/health.js";
 export type { EndpointHealth, HealthMonitorConfig } from "./rpc/health.js";
 export { CreditRateLimiter, DEFAULT_METHOD_WEIGHTS } from "./rpc/rate-limit.js";
