@@ -12,6 +12,11 @@
  * can never break the send/route path.
  */
 
+// Type-only: which side of the WS-vs-poll race delivered a terminal outcome.
+// Optional on the payloads so hand-written emitters stay source-compatible;
+// the SDK's own sender always populates it (issue #10).
+import type { ConfirmationPath } from "./tx/confirmation.js";
+
 /** Fields common to every `transaction:*` event. `txId` is stable per send. */
 export interface TransactionEvent {
   /** Stable identifier for this logical send, consistent across its events. */
@@ -29,9 +34,15 @@ export type LifecycleEventMap = {
   "transaction:pending": TransactionEvent;
   "transaction:simulated": TransactionEvent;
   "transaction:sent": TransactionEvent;
-  "transaction:confirmed": TransactionEvent & { slot: bigint | null };
-  "transaction:failed": TransactionEvent & { err: unknown };
+  "transaction:confirmed": TransactionEvent & { slot: bigint | null; via?: ConfirmationPath };
+  "transaction:failed": TransactionEvent & { err: unknown; via?: ConfirmationPath };
   "transaction:expired": TransactionEvent;
+  /**
+   * The signature subscription errored or closed without delivering, and the
+   * tracker fell back to pure polling. NOT emitted when WS merely loses the
+   * race to a faster poll, and never in pure-polling mode.
+   */
+  "transaction:ws-fallback": { signature: string; reason: string };
   "connection:failover": { from: string; to: string; reason: string };
   "connection:health": { endpoint: string; healthy: boolean; slot: bigint | null };
   "connection:cluster-detected": { cluster: string; genesisHash: string };

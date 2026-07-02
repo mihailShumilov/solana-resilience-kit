@@ -12,7 +12,7 @@
  */
 import type { Base64EncodedWireTransaction, Rpc, SolanaRpcApi } from "@solana/kit";
 import type { Metrics } from "../observability/metrics.js";
-import { ConfirmationTracker, type TerminalOutcome } from "./confirmation.js";
+import { ConfirmationTracker, type SignatureSubscriptionsApi, type TerminalOutcome } from "./confirmation.js";
 import { ErrorTranslator } from "../error-translator.js";
 import type { LifecycleEmitter } from "../events.js";
 import { ClusterDetector, type ClusterGuardConfig } from "../rpc/cluster.js";
@@ -47,6 +47,11 @@ export interface SenderDeps {
   events?: LifecycleEmitter;
   /** Optional guard that blocks/warns when the RPC is on the wrong cluster. */
   clusterGuard?: ClusterGuardConfig;
+  /**
+   * Optional kit/v2 subscriptions transport, passed through to the internal
+   * ConfirmationTracker so its WS fast-path races the poll loop (issue #10).
+   */
+  subscriptions?: SignatureSubscriptionsApi;
 }
 
 export class TransactionSender {
@@ -56,6 +61,7 @@ export class TransactionSender {
   private readonly clusterGuard: ClusterGuardConfig | undefined;
   private readonly clusterDetector: ClusterDetector;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly subscriptions: SignatureSubscriptionsApi | undefined;
 
   constructor(rpc: Rpc<SolanaRpcApi>, deps?: SenderDeps) {
     this.rpc = rpc;
@@ -64,6 +70,7 @@ export class TransactionSender {
     this.clusterGuard = deps?.clusterGuard;
     this.clusterDetector = deps?.clusterGuard?.detector ?? new ClusterDetector();
     this.sleep = deps?.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.subscriptions = deps?.subscriptions;
   }
 
   /**
@@ -158,6 +165,8 @@ export class TransactionSender {
     // tracker checks status BEFORE sleeping, so an unlanded tx triggers at least
     // one resend of the identical signed bytes before the next status check.
     const tracker = new ConfirmationTracker(this.rpc, {
+      subscriptions: this.subscriptions,
+      events: this.events,
       sleep: async (ms) => {
         // Resend the SAME signed bytes (never re-sign). Once the tx lands, an
         // RPC rejects a resend with "already processed" (a preflight failure),
@@ -183,12 +192,12 @@ export class TransactionSender {
       pollIntervalMs: config.rebroadcastIntervalMs,
     });
 
-    this.metrics?.recordLanding(config.signature, res.outcome, res.polls);
+    this.metrics?.recordLanding(config.signature, res.outcome, res.polls, res.via);
 
     if (res.outcome === "confirmed") {
-      this.events?.emit("transaction:confirmed", { ...baseEvent(), slot: res.slot });
+      this.events?.emit("transaction:confirmed", { ...baseEvent(), slot: res.slot, via: res.via });
     } else if (res.outcome === "failed") {
-      this.events?.emit("transaction:failed", { ...baseEvent(), err: res.err });
+      this.events?.emit("transaction:failed", { ...baseEvent(), err: res.err, via: res.via });
     } else {
       this.events?.emit("transaction:expired", baseEvent());
     }

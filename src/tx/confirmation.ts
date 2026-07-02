@@ -15,9 +15,17 @@
  */
 import type { Rpc, Signature, SolanaRpcApi } from "@solana/kit";
 import type { HealthMonitor } from "../rpc/health.js";
+import type { LifecycleEmitter } from "../events.js";
 
 /** Three terminal outcomes: it confirmed, it landed-but-failed, or it expired. */
 export type TerminalOutcome = "confirmed" | "failed" | "expired";
+
+/**
+ * Which side of the WS-vs-poll race delivered the outcome (issue #10). Pure
+ * polling and expiry always report "poll"; only a subscription-delivered
+ * result reports "ws". Attribution never alters the outcome itself.
+ */
+export type ConfirmationPath = "ws" | "poll";
 
 /** A named, pre-built RPC client the tracker may poll for signature status. */
 export interface ConfirmationEndpoint {
@@ -68,6 +76,8 @@ export interface TrackResult {
   outcome: TerminalOutcome;
   slot: bigint | null;
   polls: number;
+  /** Which racer delivered the outcome: the WS fast-path or the poll loop. */
+  via: ConfirmationPath;
   /** Present (and `!= null`) only when `outcome === "failed"`. */
   err?: unknown;
 }
@@ -86,6 +96,12 @@ export interface ConfirmationDeps {
    * polling uses the single primary `rpc` exactly as before.
    */
   multiEndpoint?: MultiEndpointConfig;
+  /**
+   * Optional lifecycle event stream (same pattern as `ResilientRpcPool`).
+   * Used only to emit `transaction:ws-fallback` when the subscription errors
+   * or closes without delivering (issue #10).
+   */
+  events?: LifecycleEmitter;
 }
 
 /** Normalized result of one status check (single- or multi-endpoint). */
@@ -107,12 +123,14 @@ export class ConfirmationTracker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly subscriptions: SignatureSubscriptionsApi | undefined;
   private readonly multiEndpoint: MultiEndpointConfig | undefined;
+  private readonly events: LifecycleEmitter | undefined;
 
   constructor(rpc: Rpc<SolanaRpcApi>, deps?: ConfirmationDeps) {
     this.rpc = rpc;
     this.sleep = deps?.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.subscriptions = deps?.subscriptions;
     this.multiEndpoint = deps?.multiEndpoint;
+    this.events = deps?.events;
   }
 
   /**
@@ -183,10 +201,10 @@ export class ConfirmationTracker {
 
       // Landed but failed on-chain: terminal, surfaced for the sender.
       if (status.kind === "failed") {
-        return { signature: config.signature, outcome: "failed", slot: status.slot, polls, err: status.err };
+        return { signature: config.signature, outcome: "failed", slot: status.slot, polls, via: "poll", err: status.err };
       }
       if (status.kind === "confirmed") {
-        return { signature: config.signature, outcome: "confirmed", slot: status.slot, polls };
+        return { signature: config.signature, outcome: "confirmed", slot: status.slot, polls, via: "poll" };
       }
 
       // Termination bound: once current block height passes the caller-supplied
@@ -195,7 +213,7 @@ export class ConfirmationTracker {
       const blockHeight = await this.statusClients()[0]!.getBlockHeight().send();
       if (signal.aborted) return ABSTAIN;
       if (blockHeight > config.lastValidBlockHeight) {
-        return { signature: config.signature, outcome: "expired", slot: null, polls };
+        return { signature: config.signature, outcome: "expired", slot: null, polls, via: "poll" };
       }
 
       await this.sleep(pollIntervalMs);
@@ -223,18 +241,33 @@ export class ConfirmationTracker {
             outcome: "failed",
             slot: notification.context.slot,
             polls: 0,
+            via: "ws",
             err: notification.value.err,
           };
         }
-        return { signature: config.signature, outcome: "confirmed", slot: notification.context.slot, polls: 0 };
+        return { signature: config.signature, outcome: "confirmed", slot: notification.context.slot, polls: 0, via: "ws" };
       }
-    } catch {
+      // Closed without delivering: a genuine disconnect (issue #10) — unless
+      // the poll loop already won and the abort is what ended the stream.
+      this.emitWsFallback(config.signature, "subscription closed without delivering", ac.signal);
+    } catch (err) {
       // best-effort: any subscription failure falls back to polling.
+      this.emitWsFallback(config.signature, err instanceof Error ? err.message : String(err), ac.signal);
     }
     // Subscribe failed or the stream closed empty: abstain until the poll loop
     // wins (which aborts `ac`), so this never settles the race prematurely.
     await waitForAbort(ac.signal);
     return ABSTAIN;
+  }
+
+  /**
+   * Emit `transaction:ws-fallback` for a genuine subscription failure. Once
+   * `ac` is aborted the race is already decided, so an abort-induced stream
+   * close/error is NOT a fallback and stays silent (issue #10).
+   */
+  private emitWsFallback(signature: string, reason: string, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.events?.emit("transaction:ws-fallback", { signature, reason });
   }
 
   /**
@@ -284,7 +317,7 @@ export class ConfirmationTracker {
   }
 
   private expired(config: TrackConfig, polls: number): TrackResult {
-    return { signature: config.signature, outcome: "expired", slot: null, polls };
+    return { signature: config.signature, outcome: "expired", slot: null, polls, via: "poll" };
   }
 }
 
