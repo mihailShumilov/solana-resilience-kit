@@ -64,7 +64,7 @@ export async function run(): Promise<ExampleResult> {
   });
   log("racing a signatureNotifications WebSocket alongside the poll loop…");
   const ws = await wsTracker.track({ signature: wsSig, lastValidBlockHeight: 700n });
-  log(`WS fast-path outcome: ${ws.outcome} with ${ws.polls} status poll(s)`);
+  log(`WS fast-path outcome: ${ws.outcome} via ${ws.via} with ${ws.polls} status poll(s)`);
 
   return {
     logs,
@@ -72,6 +72,9 @@ export async function run(): Promise<ExampleResult> {
       "fan-out outcome": fanout.outcome,
       "tolerated dead node": fanout.outcome === "confirmed",
       "ws outcome": ws.outcome,
+      // TrackResult.via attributes the outcome to whichever racer delivered it
+      // ("ws" | "poll") — chart WS latency wins vs polling fallbacks.
+      "ws delivered via": ws.via,
       "ws landed slot": ws.slot === null ? "—" : Number(ws.slot),
       "ws status polls": ws.polls, // 0 → the socket resolved before any poll
     },

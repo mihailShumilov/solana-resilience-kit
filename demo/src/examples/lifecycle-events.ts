@@ -7,7 +7,7 @@
  * can never break the send path.
  */
 import { ResilientRpcPool, TransactionSender, LifecycleEmitter } from "solana-resilience-kit";
-import { MockCluster, MockEndpoint } from "solana-resilience-kit/testing";
+import { MockCluster, MockEndpoint, MockSubscriptions } from "solana-resilience-kit/testing";
 import type { ExampleResult } from "./types.js";
 
 export async function run(): Promise<ExampleResult> {
@@ -18,15 +18,21 @@ export async function run(): Promise<ExampleResult> {
   // Primary rate-limits every request (429); the backup is healthy.
   const flaky = new MockEndpoint(cluster, { name: "rpc-a", faults: { rate429Rate: 1 } });
   const healthy = new MockEndpoint(cluster, { name: "rpc-b" });
+  // A confirmation WebSocket that errors on subscribe: the tracker falls back
+  // to polling and reports the disconnect as a transaction:ws-fallback event.
+  const subs = new MockSubscriptions();
+  subs.failSubscription("evt-tx");
 
   // One emitter, shared by the pool (connection:*) and the sender (transaction:*).
   const events = new LifecycleEmitter();
   const stream: string[] = [];
   events.on("transaction:pending", () => stream.push("transaction:pending"));
   events.on("transaction:sent", () => stream.push("transaction:sent"));
-  events.on("transaction:confirmed", (p) => stream.push(`transaction:confirmed (slot ${p.slot})`));
+  // `via` attributes the confirmation to the WS fast-path or the poll loop.
+  events.on("transaction:confirmed", (p) => stream.push(`transaction:confirmed (slot ${p.slot}, via ${p.via})`));
   events.on("transaction:failed", () => stream.push("transaction:failed"));
   events.on("transaction:expired", () => stream.push("transaction:expired"));
+  events.on("transaction:ws-fallback", (p) => stream.push(`transaction:ws-fallback (${p.reason})`));
   events.on("connection:failover", (p) => stream.push(`connection:failover (${p.from}→${p.to})`));
   events.on("connection:health", (p) => stream.push(`connection:health (${p.endpoint} healthy=${p.healthy})`));
 
@@ -39,7 +45,7 @@ export async function run(): Promise<ExampleResult> {
     events,
   });
   const sleep = async () => cluster.advanceSlots(1);
-  const sender = new TransactionSender(pool.rpc(), { sleep, events });
+  const sender = new TransactionSender(pool.rpc(), { sleep, events, subscriptions: subs });
 
   log("sending through a 429 primary with a shared LifecycleEmitter attached…");
   const res = await sender.sendAndConfirm({
@@ -55,6 +61,7 @@ export async function run(): Promise<ExampleResult> {
       outcome: res.outcome,
       "events emitted": stream.length,
       "saw failover": stream.some((e) => e.startsWith("connection:failover")),
+      "saw ws-fallback": stream.some((e) => e.startsWith("transaction:ws-fallback")),
       "lifecycle order": stream
         .filter((e) => e.startsWith("transaction:"))
         .map((e) => e.split(" ")[0]!.replace("transaction:", ""))
