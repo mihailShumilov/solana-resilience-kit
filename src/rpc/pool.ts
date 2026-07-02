@@ -226,8 +226,15 @@ export class ResilientRpcPool {
       if (slot !== undefined) this.metrics?.recordSlot(endpoint.name, slot);
       this.noteHealth(endpoint.name);
     } catch (err) {
-      // Swallow: a probe failure must never abort the real request path.
+      // Swallow: a probe failure must never abort the real request path. But
+      // it MUST feed the metrics sink: a degraded endpoint is ranked out and
+      // stops serving real traffic, so its probe failures are the only signal
+      // an OTel dashboard ever sees (issue #9). Successful probes stay out of
+      // recordRequest so synthetic traffic never inflates success counts.
+      const latencyMs = Date.now() - start;
+      if (isRateLimited(err)) this.metrics?.recordRateLimited(endpoint.name);
       this.healthMonitor.recordFailure(endpoint.name, err);
+      this.metrics?.recordRequest(endpoint.name, probePayload.method, latencyMs, false);
       this.noteHealth(endpoint.name);
     }
   }
