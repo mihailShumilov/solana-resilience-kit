@@ -11,12 +11,40 @@ jobs:
       # below the thresholds in vitest.config.ts (lines/functions 90, branches 85).
       - run: docker compose run --rm cov
 
+  # The peer range is `>=6.9.0 <9`. A wide range is only honest if it is tested:
+  # @solana/kit publishes linearly with no LTS branch and no backports, so
+  # pinning consumers to one major means a fix released on the next is simply
+  # unreachable for them (#20). This matrix is what makes the range a tested
+  # claim rather than an optimistic one — widen the upper bound only after
+  # adding the new major here and seeing it green.
+  peer-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kit: ["6.10.0", "7.1.1", "8.2.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Install the peer under test
+        run: npm install --no-save --no-audit --no-fund @solana/kit@${{ matrix.kit }}
+      - name: Confirm the version actually resolved
+        run: |
+          RESOLVED=$(node -p "require('./node_modules/@solana/kit/package.json').version")
+          echo "@solana/kit resolved to $RESOLVED"
+          [ "$RESOLVED" = "${{ matrix.kit }}" ] || { echo "::error::expected ${{ matrix.kit }}"; exit 1; }
+      - run: npm run typecheck
+      - run: npm test
+
   publish:
     # Publishes to npm via OIDC "trusted publishing" — no token, no OTP.
     # Fires only on a version tag (e.g. v1.0.1) whose package.json version matches.
     # Requires the npm Trusted Publisher configured for mihailShumilov/solana-resilience-kit
     # against this workflow file (ci.yml).
-    needs: test
+    needs: [test, peer-matrix]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

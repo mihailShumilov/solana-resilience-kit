@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 // The generated TypeDoc API reference lives in `public/api` (so the build copies
@@ -54,10 +55,16 @@ const demoModule = (name: string) =>
 // sources, just like the Lab does.
 const repoFile = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
 
+// The site states which SDK version it documents, read from the package it
+// actually builds against — so the badge can never drift from the code.
+const SDK_VERSION: string = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+
 export default defineConfig({
   plugins: [react(), serveTypedoc()],
   // @solana/web3.js v1 and the wallet-adapter reference `global`; map it to globalThis.
-  define: { global: "globalThis" },
+  define: { global: "globalThis", __SDK_VERSION__: JSON.stringify(SDK_VERSION) },
   resolve: {
     // Array form so the `/testing` subpath is matched before the bare package
     // (first match wins). Order matters.

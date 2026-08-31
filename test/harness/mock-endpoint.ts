@@ -31,7 +31,7 @@ export class MockEndpoint {
   faults: EndpointFaultProfile;
   private readonly rng: Rng;
   /** Counters tests/observability can assert against. */
-  readonly stats = { requests: 0, errors: 0, rateLimited: 0, dropped: 0, sends: 0 };
+  readonly stats = { requests: 0, errors: 0, rateLimited: 0, dropped: 0, sends: 0, errorBodies: 0 };
   /** Per-method invocation counts (e.g. how many getSignatureStatuses polls ran). */
   readonly rpcCalls: Record<string, number> = {};
   /** The config object (params[1]) of the most recent sendTransaction call. */
@@ -101,6 +101,18 @@ export class MockEndpoint {
       }
 
       await self.applyLatency(config.signal);
+
+      // An error BODY over a successful HTTP response. Returned, never thrown —
+      // that asymmetry is exactly what made this failure class invisible.
+      const bodyError = self.faults.jsonRpcError;
+      if (bodyError !== undefined) {
+        self.stats.errorBodies += 1;
+        return {
+          jsonrpc: "2.0",
+          id: payload.id,
+          error: { code: bodyError.code, message: bodyError.message ?? "" },
+        } as unknown as TResponse;
+      }
 
       const result = self.dispatch(payload);
       return { jsonrpc: "2.0", id: payload.id, result } as unknown as TResponse;

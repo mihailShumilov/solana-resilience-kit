@@ -14,6 +14,13 @@ export interface EndpointFaultProfile {
   rate429Rate?: number;
   /** Slots this node lags behind cluster truth (models a stale/lagging node). */
   slotLag?: number;
+  /**
+   * Answer every request with a JSON-RPC error BODY over HTTP 200 — how a real
+   * node reports "behind by N slots" or "block not available" (issue #19).
+   * Distinct from the error faults above: nothing throws, the request
+   * SUCCEEDS at the transport layer and the failure is in the payload.
+   */
+  jsonRpcError?: { code: number; message?: string };
   /** When true, every request rejects immediately (node down). */
   offline?: boolean;
 }

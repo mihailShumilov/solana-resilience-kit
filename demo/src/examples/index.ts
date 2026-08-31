@@ -16,6 +16,8 @@ import { run as freshnessRouting } from "./freshness-routing.js";
 import freshnessRoutingSrc from "./freshness-routing.ts?raw";
 import { run as endpointEjection } from "./endpoint-ejection.js";
 import endpointEjectionSrc from "./endpoint-ejection.ts?raw";
+import { run as errorBodyFailover } from "./error-body-failover.js";
+import errorBodyFailoverSrc from "./error-body-failover.ts?raw";
 import { run as jitoFallback } from "./jito-fallback.js";
 import jitoFallbackSrc from "./jito-fallback.ts?raw";
 import { run as feeEstimation } from "./fee-estimation.js";
@@ -92,6 +94,15 @@ export const EXAMPLES: Example[] = [
       "A provider's quota runs out and it 429s everything. After three strikes the pool opens the circuit and skips it with no network call at all, then half-opens once the cooldown expires. Skips never reach the Metrics sink, so they can't drag your success rate down.",
     code: endpointEjectionSrc,
     run: endpointEjection,
+  },
+  {
+    id: "error-body-failover",
+    title: "Error bodies that look like success",
+    tag: "rpc · failover",
+    description:
+      "A node that is behind answers HTTP 200 with a JSON-RPC error body, so transports don't throw and naive pools count it as a success. The pool reads the body, fails over, and ejects the node — while leaving caller faults like 'invalid params' alone.",
+    code: errorBodyFailoverSrc,
+    run: errorBodyFailover,
   },
   {
     id: "jito-fallback",

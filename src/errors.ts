@@ -46,6 +46,26 @@ export class EndpointEjectedError extends SdkError {
   }
 }
 
+/**
+ * A node answered HTTP 200 with a JSON-RPC `error` body describing its OWN
+ * state — "behind by N slots", "block not available", "transaction history is
+ * not available from this node" (issue #19). The request was fine; this
+ * endpoint just cannot serve it, which is precisely the failure class another
+ * endpoint is most likely to answer.
+ *
+ * `statusCode` is set to 429 when the body reports a rate limit, so the same
+ * detection and cooldown that handle an HTTP 429 apply unchanged.
+ */
+export class RpcNodeStateError extends SdkError {
+  constructor(
+    readonly code: number,
+    readonly rpcMessage: string,
+    readonly statusCode?: number,
+  ) {
+    super(`RPC node reported error ${code}${rpcMessage === "" ? "" : `: ${rpcMessage}`}`);
+  }
+}
+
 /** A Jito bundle did not land before its deadline; caller should fall back. */
 export class BundleNotLandedError extends SdkError {
   constructor(readonly bundleId: string) {
