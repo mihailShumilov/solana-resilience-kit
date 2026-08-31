@@ -1,6 +1,6 @@
 {
   "name": "solana-resilience-kit",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Vendor-neutral, client-side resilience and observability layer for Solana dApps, built on @solana/kit (web3.js v2).",
   "type": "module",
   "license": "MIT",

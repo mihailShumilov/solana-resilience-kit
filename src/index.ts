@@ -20,6 +20,10 @@ export type { ResilientEndpoint, ResilientRpcConfig } from "./rpc/pool.js";
 export type { RpcTransport } from "@solana/kit";
 export { HealthMonitor } from "./rpc/health.js";
 export type { EndpointHealth, HealthMonitorConfig } from "./rpc/health.js";
+// Error-shape normalisation. Exported because every consumer writing their own
+// back-off needs to tell a 429 from anything else, and the status lives in a
+// different place depending on which layer threw (issue #16).
+export { httpStatusOf, isRateLimited, retryAfterMs } from "./rpc/http-status.js";
 export { CreditRateLimiter, DEFAULT_METHOD_WEIGHTS } from "./rpc/rate-limit.js";
 export type { RateLimiterConfig } from "./rpc/rate-limit.js";
 export { ClusterDetector, CLUSTER_GENESIS_HASHES } from "./rpc/cluster.js";
@@ -54,7 +58,15 @@ export type { TipFloor, TipPercentile, TipEstimatorConfig } from "./jito/tips.js
 
 // Observability
 export { InMemoryMetrics, OtelMetrics } from "./observability/metrics.js";
-export type { Metrics, OtelMetricsConfig } from "./observability/metrics.js";
+export type {
+  Metrics,
+  OtelMetricsConfig,
+  MetricAttributes,
+  OtelMeterLike,
+  OtelMeterProviderLike,
+  OtelCounterLike,
+  OtelRecorderLike,
+} from "./observability/metrics.js";
 
 // Lifecycle events (typed, browser-safe stream for dApp UIs)
 export { TypedEventEmitter, LifecycleEmitter } from "./events.js";

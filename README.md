@@ -142,7 +142,7 @@ The pool exposes a real `@solana/kit` `RpcTransport`, so callers build a normal 
 npm install solana-resilience-kit @solana/kit
 ```
 
-Requires Node ≥ 20. The package is ESM-only and ships compiled JS with type declarations. **`@solana/kit` is a required peer dependency** (`^6.9.0`): install it alongside so your app and the SDK resolve to a *single* kit instance — this keeps kit's branded types (`Address`, `Signature`, `Base64EncodedWireTransaction`, …) compatible across the boundary. `@opentelemetry/api` and `react` are **optional** peers, needed only for `OtelMetrics` and the `./react` hook respectively (see [Package entry points](#package-entry-points)).
+Requires Node ≥ 20. The package is ESM-only and ships compiled JS with type declarations. **`@solana/kit` is a required peer dependency** (`^6.9.0`): install it alongside so your app and the SDK resolve to a *single* kit instance — this keeps kit's branded types (`Address`, `Signature`, `Base64EncodedWireTransaction`, …) compatible across the boundary. `@opentelemetry/api` and `react` are **optional** peers, needed only for `OtelMetrics` and the `./react` hook respectively (see [Package entry points](#package-entry-points)). *Optional means optional*: nothing on the package barrel imports `@opentelemetry/api` at module scope, so importing the SDK works under pnpm's strict node-linker with neither optional peer installed.
 
 ## Quickstart
 
@@ -189,7 +189,7 @@ const result = await sender.sendAndConfirm({
 
 ### RPC resilience — pool, health, rate limiting
 
-`ResilientRpcPool` wraps N endpoints behind a single kit-compatible transport. On each logical request it routes to the freshest healthy endpoint, fails over to the next on a 429 or transport error, optionally meters weighted credits to pre-empt 429s, and emits per-request metrics and lifecycle events.
+`ResilientRpcPool` wraps N endpoints behind a single kit-compatible transport. On each logical request it routes to the freshest healthy endpoint, fails over to the next on a 429 or transport error, **ejects an endpoint that keeps failing so it stops costing traffic**, optionally meters weighted credits to pre-empt 429s, and emits per-request metrics and lifecycle events.
 
 ```ts
 import {
@@ -215,14 +215,42 @@ pool.health();   // EndpointHealth[]: { name, healthy, slot, latencyMs, errorRat
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `endpoints` | `{ name, transport }[]` | — | The endpoints to route across (a kit `RpcTransport` each). |
-| `freshnessAware` | `boolean` | `true` | Probe slots and route to the freshest healthy node first. |
-| `maxAttempts` | `number` | `endpoints.length` | Max endpoint attempts per logical request. |
-| `healthMonitor` | `HealthMonitor` | auto (`maxSlotLag: 150n`) | Shared freshness/latency/error tracker. |
+| `freshnessAware` | `boolean` | `true` | Probe slots and route to the freshest healthy node first. Health is respected either way — see below. |
+| `healthRefreshMs` | `number` | `2000` | Minimum gap between freshness probe rounds; the last observed slot is reused in between. |
+| `maxAttempts` | `number` | `endpoints.length` | Max endpoint attempts per logical request (a skipped endpoint costs no attempt). |
+| `healthMonitor` | `HealthMonitor` | auto (`maxSlotLag: 150n`) | Shared freshness/latency/error tracker and circuit breaker. |
+| `now` | `() => number` | `Date.now` | Injected clock for the probe cadence (tests). |
 | `rateLimiter` | `CreditRateLimiter` | — | Optional weighted-credit gate (a dry bucket is a soft failover). |
 | `metrics` | `Metrics` | — | Sink for per-request telemetry. |
 | `events` | `LifecycleEmitter` | — | Emits `connection:failover` / `connection:health`. |
 
+**Nothing keeps a failing endpoint in rotation.** The failure this library exists to prevent is "one provider's quota runs out and the app stops", and in that state a naive pool re-attempts the throttled provider on every single request forever. Two mechanisms prevent that, and both are on by default:
+
+- **Health-ranked ordering, in both modes.** `attemptOrder` ranks by health whether or not `freshnessAware` is on — with it off you get config order *within* the healthy group, not config order regardless of health. An endpoint that has been failing is attempted last, not first.
+- **An ejection window (circuit breaker).** An endpoint that trips `failureThreshold` consecutive failures is **skipped with no network call at all** until its cooldown expires, then admitted once, half-open, via a single cheap `getSlot` probe: a success returns it to rotation, a failure re-opens the circuit. A 429 earns the longer `rateLimitEjectionMs` — that is the provider telling you the budget is gone — unless it sent its own `Retry-After`, which wins. Skips surface as an `EndpointEjectedError` inside `AllEndpointsFailedError.attempts`, are visible as `ejected` / `ejectedUntil` on `pool.health()`, and are **never recorded in the `Metrics` sink**: the pool did not contact the endpoint, so counting it as a failed request would drag your reported success rate down for a call that never happened.
+
+**Probing is gated by an interval, not run per request.** Freshness-aware routing probes each endpoint's slot at most once per `healthRefreshMs` (default `2000`) and reuses the last observed slot in between. Ten logical requests across three endpoints cost 13 endpoint calls, not 40.
+
 **`HealthMonitor`** ranks endpoints by slot freshness (then latency), and ejects an endpoint that is more than `maxSlotLag` slots (default `150n`) behind the freshest node or that has hit `failureThreshold` consecutive failures (default `3`). `latencyAlpha` (default `0.3`) is the EWMA factor for latency.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `endpointNames` | `string[]` | — | The endpoints to track. |
+| `maxSlotLag` | `bigint` | `150n` | Slots behind the freshest node before an endpoint is stale. |
+| `failureThreshold` | `number` | `3` | Consecutive failures before the circuit opens. |
+| `ejectionMs` | `number` | `30_000` | Cooldown after an ordinary failure. **`0` disables ejection entirely.** |
+| `rateLimitEjectionMs` | `number` | `300_000` | Cooldown after a 429 (a spent quota needs longer than a blip). |
+| `latencyAlpha` | `number` | `0.3` | EWMA factor for latency. |
+| `now` | `() => number` | `Date.now` | Injected clock, so cooldowns are testable. |
+
+**429 detection works against real transports.** `@solana/kit`'s own HTTP transport throws a `SolanaError` carrying the status under `context.statusCode`, not at the top level, so a pool that only reads a top-level `statusCode` counts zero rate-limits in production. `httpStatusOf` / `isRateLimited` / `retryAfterMs` normalise every shape the stack throws — kit's `SolanaError`, gateway errors with a top-level `statusCode`, and fetch/axios-style `response.status` — and they are exported for your own back-off code:
+
+```ts
+import { isRateLimited, retryAfterMs } from "solana-resilience-kit";
+
+try { await rpc.getSlot().send(); }
+catch (err) { if (isRateLimited(err)) backOff(retryAfterMs(err) ?? 30_000); }
+```
 
 **`CreditRateLimiter`** is a lazy token bucket metered by *weighted credits* (providers charge heavy methods more). `DEFAULT_METHOD_WEIGHTS` charges `10` credits for `simulateTransaction`, `getRecentPrioritizationFees`, `getProgramAccounts`, and `getSignaturesForAddress`, and `1` for everything else; override per method via `weights`.
 
@@ -423,7 +451,7 @@ function SendButton({ sender, transaction, lastValidBlockHeight }) {
 
 ### Observability (OpenTelemetry / Datadog)
 
-The library depends on **only `@opentelemetry/api`** — `OtelMetrics` writes to the *global* OpenTelemetry meter, which is a **no-op until your app registers a real `MeterProvider`** with a reader + exporter. The OTel SDK and OTLP exporter are your application's dependencies, not the SDK's, so you choose the backend. The ~10 lines that make exports real:
+The library imports **no OTel package at all** — `OtelMetrics` writes to whichever `MeterProvider` your app registered globally, which is a **no-op until your app registers a real one** with a reader + exporter. The OTel SDK and OTLP exporter are your application's dependencies, not the SDK's, so you choose the backend. The ~10 lines that make exports real:
 
 ```ts
 import { metrics } from "@opentelemetry/api";
@@ -457,6 +485,8 @@ npm install @opentelemetry/sdk-metrics @opentelemetry/exporter-metrics-otlp-http
 
 **For Datadog**, point `OTEL_EXPORTER_OTLP_ENDPOINT` at the Datadog Agent's OTLP endpoint (enable OTLP ingestion in the Agent); no separate Collector needed. `InMemoryMetrics` is a fully-implemented sink (with a `successRate()` helper) for tests and local debugging.
 
+Prefer not to register a global? Pass the provider or meter straight in — `new OtelMetrics({ meterProvider })` or `new OtelMetrics({ meter })`. An injected meter always wins over the global one, and with neither present `OtelMetrics` degrades to inert no-op instruments rather than throwing.
+
 The SDK emits a small, fixed set of client-side instruments:
 
 | Instrument | Type | Attributes | Emitted when |
@@ -468,7 +498,7 @@ The SDK emits a small, fixed set of client-side instruments:
 | `tx.landings` | counter | `signature`, `outcome`, `slots`, `via` | a transaction reaches a terminal outcome (`confirmed` / `expired`) |
 | `rpc.endpoint.slot` | gauge | `endpoint` | a `getSlot` response is observed (slot-lag dashboards) |
 
-Two details that keep dashboards honest: **probe-detected degradation is not invisible** — when freshness routing probes an endpoint, finds it failing, and routes real traffic away from it, the failed probes still feed `rpc.request.failures` / `rpc.rate_limited` (successful probes stay out of the counters so synthetic traffic never inflates success rates). And **confirmations are path-attributed** — `tx.landings` carries `via: "ws" | "poll"`, so combined with the WS fast-path you can chart the actual latency benefit and the polling fallback rate.
+Four details that keep dashboards honest: **a real 429 is actually counted** — the status is read wherever the layer beneath put it, including `@solana/kit`'s `SolanaError.context.statusCode`, so `rpc.rate_limited` does not sit at zero through a provider quota exhaustion. **An ejected endpoint is not counted at all** — a skip is not a failed request, so the circuit breaker cannot depress your success rate for calls that never happened. And **probe-detected degradation is not invisible** — when freshness routing probes an endpoint, finds it failing, and routes real traffic away from it, the failed probes still feed `rpc.request.failures` / `rpc.rate_limited` (successful probes stay out of the counters so synthetic traffic never inflates success rates). Finally, **confirmations are path-attributed** — `tx.landings` carries `via: "ws" | "poll"`, so combined with the WS fast-path you can chart the actual latency benefit and the polling fallback rate.
 
 A runnable end-to-end demo is in [`examples/otel-setup.ts`](./examples/otel-setup.ts): `npm run example:otel` wires `OtelMetrics` into a pool + sender, drives simulated sends against the harness, and exports all six instruments — with a console exporter attached so you see every data point even without a collector running.
 
@@ -572,7 +602,7 @@ A headless Node example is in [`examples/devnet-demo.ts`](./examples/devnet-demo
 | `solana-resilience-kit/react` | `useResilientSender` hook | `react` (optional peer) |
 | `solana-resilience-kit/testing` | the deterministic fault harness | — |
 
-`OtelMetrics` additionally uses the optional `@opentelemetry/api` peer. The core bundle is `sideEffects: false` and tree-shakable.
+`OtelMetrics` interoperates with the optional `@opentelemetry/api` peer but never imports it: it reads the `MeterProvider` your app registered from OTel's own global registry, or takes one you inject. Nothing in the package fails to load when OTel is absent. The core bundle is `sideEffects: false` and tree-shakable.
 
 ## Testing & simulation
 
