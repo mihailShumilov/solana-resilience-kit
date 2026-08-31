@@ -9,8 +9,14 @@
  * `isRateLimited()` false for every REAL 429, so `Metrics.recordRateLimited`
  * read zero exactly when a provider was throttling the app (issue #16).
  *
+ * The same asymmetry exists one layer down. A node reporting "behind by N
+ * slots" answers HTTP 200 with a JSON-RPC `error` BODY, which kit resolves
+ * rather than throws — so {@link nodeStateError} is the body-layer twin of
+ * {@link httpStatusOf} (issue #19).
+ *
  * Pure and total: never throws, never does I/O.
  */
+import { RpcNodeStateError } from "../errors.js";
 
 /** Read an HTTP status off an error wherever the layer beneath us put it. */
 export function httpStatusOf(err: unknown): number | undefined {
@@ -78,4 +84,68 @@ function headerBags(err: unknown): Array<Record<string, unknown>> {
   return candidates.filter(
     (c): c is Record<string, unknown> => c !== null && typeof c === "object" && !Array.isArray(c),
   );
+}
+
+/**
+ * JSON-RPC codes that describe the NODE answering, not the request asked of
+ * it. Every one of these is worth trying somewhere else: a lagging node, a
+ * pruned block, or a node without the history the query needs. Deliberately an
+ * ALLOWLIST — an unknown code is left alone rather than blamed on the endpoint.
+ */
+const NODE_STATE_CODES = new Set([
+  -32004, // Block not available for slot
+  -32005, // Node is unhealthy / behind by N slots
+  -32007, // Slot skipped, or missing due to a ledger jump to a recent snapshot
+  -32009, // Slot skipped, or missing in long-term storage
+  -32011, // Transaction history is not available from this node
+  -32019, // Failed to query long-term storage
+]);
+
+/**
+ * Standard JSON-RPC faults that belong to the CALLER. Every endpoint repeats
+ * them, so failing over just burns a second provider, and ejecting a healthy
+ * one because a caller sent bad params would be a worse bug than #19 itself.
+ */
+const CLIENT_FAULT_CODES = new Set([-32700, -32600, -32601, -32602, -32603]);
+
+/** Gateways that report throttling in the body rather than the status line. */
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests/i;
+
+interface JsonRpcErrorMember {
+  code: number;
+  message: string;
+}
+
+/** The `error` member of a JSON-RPC response, when it is a well-formed one. */
+function jsonRpcErrorOf(response: unknown): JsonRpcErrorMember | undefined {
+  if (response === null || typeof response !== "object") return undefined;
+  const member = (response as { error?: unknown }).error;
+  if (member === null || typeof member !== "object") return undefined;
+  const { code, message } = member as { code?: unknown; message?: unknown };
+  if (typeof code !== "number") return undefined;
+  return { code, message: typeof message === "string" ? message : "" };
+}
+
+/**
+ * Inspect a RESOLVED transport response for an error body that the pool should
+ * treat as an endpoint failure — so it fails over, records a failure, and can
+ * eject, instead of committing to a node that just told us it cannot serve.
+ *
+ * Returns undefined for a normal response, for caller faults, and for any code
+ * outside the allowlist (including transaction-level errors like a failed
+ * simulation, which another endpoint would report identically).
+ */
+export function nodeStateError(response: unknown): RpcNodeStateError | undefined {
+  const err = jsonRpcErrorOf(response);
+  if (err === undefined) return undefined;
+  // Checked first: a caller fault stays a caller fault even if its message
+  // happens to contain the words below.
+  if (CLIENT_FAULT_CODES.has(err.code)) return undefined;
+
+  const rateLimited = err.code === 429 || RATE_LIMIT_TEXT.test(err.message);
+  if (!rateLimited && !NODE_STATE_CODES.has(err.code)) return undefined;
+
+  // Reusing statusCode 429 lets isRateLimited() and the existing
+  // rateLimitEjectionMs window apply with no further plumbing.
+  return new RpcNodeStateError(err.code, err.message, rateLimited ? 429 : undefined);
 }

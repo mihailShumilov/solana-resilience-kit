@@ -142,7 +142,17 @@ The pool exposes a real `@solana/kit` `RpcTransport`, so callers build a normal 
 npm install solana-resilience-kit @solana/kit
 ```
 
-Requires Node ≥ 20. The package is ESM-only and ships compiled JS with type declarations. **`@solana/kit` is a required peer dependency** (`^6.9.0`): install it alongside so your app and the SDK resolve to a *single* kit instance — this keeps kit's branded types (`Address`, `Signature`, `Base64EncodedWireTransaction`, …) compatible across the boundary. `@opentelemetry/api` and `react` are **optional** peers, needed only for `OtelMetrics` and the `./react` hook respectively (see [Package entry points](#package-entry-points)). *Optional means optional*: nothing on the package barrel imports `@opentelemetry/api` at module scope, so importing the SDK works under pnpm's strict node-linker with neither optional peer installed.
+Requires Node ≥ 20. The package is ESM-only and ships compiled JS with type declarations. **`@solana/kit` is a required peer dependency** (`>=6.9.0 <9`): install it alongside so your app and the SDK resolve to a *single* kit instance — this keeps kit's branded types (`Address`, `Signature`, `Base64EncodedWireTransaction`, …) compatible across the boundary. `@opentelemetry/api` and `react` are **optional** peers, needed only for `OtelMetrics` and the `./react` hook respectively (see [Package entry points](#package-entry-points)). *Optional means optional*: nothing on the package barrel imports `@opentelemetry/api` at module scope, so importing the SDK works under pnpm's strict node-linker with neither optional peer installed.
+
+**The kit peer range spans three majors on purpose.** Kit publishes linearly — no LTS branch, no backports — so a narrow range does not keep consumers safe, it strands them: a fix released on the next major becomes unreachable without breaking the peer. This package's entire coupling to kit is two functions and four types:
+
+```ts
+createSolanaRpc            // cli/diagnose.ts
+createSolanaRpcFromTransport  // rpc/pool.ts
+type Rpc, RpcTransport, SolanaRpcApi, Signature
+```
+
+Nothing here touches codecs, transaction building, signers or subscriptions — the areas that actually changed across 6 → 7 → 8. The range is enforced by a **CI matrix** that runs the full suite and `tsc --noEmit` against `@solana/kit` 6.10.0, 7.1.1 and 8.2.0 on every push, and the npm publish is gated on it. The upper bound moves only after a new major is added to that matrix and goes green — never on assumption.
 
 ## Quickstart
 
@@ -242,6 +252,21 @@ pool.health();   // EndpointHealth[]: { name, healthy, slot, latencyMs, errorRat
 | `rateLimitEjectionMs` | `number` | `300_000` | Cooldown after a 429 (a spent quota needs longer than a blip). |
 | `latencyAlpha` | `number` | `0.3` | EWMA factor for latency. |
 | `now` | `() => number` | `Date.now` | Injected clock, so cooldowns are testable. |
+
+**A JSON-RPC error body is a failover signal, not a success.** A node reporting "behind by 1500 slots", or a block it no longer has, answers **HTTP 200 with a JSON-RPC `error` body** — kit's transport only throws on `!response.ok`, so that whole failure class used to be returned verbatim: no failover, a `recordSuccess` on the health monitor, a *success* in the metrics sink, and the lagging node still reported healthy. The error surfaced later from kit's API layer, outside the failover loop. This is the failure class most likely to be answerable elsewhere — a network error is often correlated across providers, "this node is behind" is by definition not.
+
+`nodeStateError` inspects each resolved response and, for codes that describe the **node** rather than the request, throws an `RpcNodeStateError` into the normal failover path:
+
+| Code | Meaning |
+|---|---|
+| `-32004` | Block not available for slot |
+| `-32005` | Node is unhealthy / behind by N slots |
+| `-32007` | Slot skipped, or missing due to a ledger jump |
+| `-32009` | Slot skipped, or missing in long-term storage |
+| `-32011` | Transaction history is not available from this node |
+| `-32019` | Failed to query long-term storage |
+
+A body reporting a rate limit (code `429`, or rate-limit wording) is given `statusCode: 429`, so the existing `rateLimitEjectionMs` window applies unchanged. Caller faults — `-32700`, `-32600`, `-32601`, `-32602`, `-32603` — are deliberately **never** blamed on the endpoint: every endpoint would repeat them, and ejecting a healthy provider because one caller sent bad params would be a worse bug than the one being fixed. The list is an allowlist, so an unrecognised code (a failed simulation, say) is left exactly as it was.
 
 **429 detection works against real transports.** `@solana/kit`'s own HTTP transport throws a `SolanaError` carrying the status under `context.statusCode`, not at the top level, so a pool that only reads a top-level `statusCode` counts zero rate-limits in production. `httpStatusOf` / `isRateLimited` / `retryAfterMs` normalise every shape the stack throws — kit's `SolanaError`, gateway errors with a top-level `statusCode`, and fetch/axios-style `response.status` — and they are exported for your own back-off code:
 

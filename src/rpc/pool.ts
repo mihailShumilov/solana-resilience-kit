@@ -17,7 +17,7 @@
 import { createSolanaRpcFromTransport, type Rpc, type RpcTransport, type SolanaRpcApi } from "@solana/kit";
 import { AllEndpointsFailedError, EndpointEjectedError } from "../errors.js";
 import { HealthMonitor, type EndpointHealth } from "./health.js";
-import { isRateLimited } from "./http-status.js";
+import { isRateLimited, nodeStateError } from "./http-status.js";
 import type { CreditRateLimiter } from "./rate-limit.js";
 import type { Metrics } from "../observability/metrics.js";
 import type { LifecycleEmitter } from "../events.js";
@@ -30,11 +30,13 @@ interface JsonRpcPayload {
   params?: unknown[];
 }
 
-/** Minimal shape of a JSON-RPC response a transport returns. */
+/** Minimal shape of a JSON-RPC response a transport returns. A node reporting
+ * its own state answers HTTP 200 with `error` instead of `result` (issue #19). */
 interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: number | string;
   result: unknown;
+  error?: { code: number; message?: string };
 }
 
 /** Default gap between freshness probe rounds. */
@@ -162,6 +164,13 @@ export class ResilientRpcPool {
         const start = Date.now();
         try {
           const response = (await endpoint.transport(config)) as JsonRpcResponse;
+          // A node that is behind, or missing a block, answers HTTP 200 with a
+          // JSON-RPC error body — kit resolves that, it never throws. Turning it
+          // into a throw here puts it through the SAME failover / health /
+          // ejection path as any other endpoint failure (issue #19). Caller
+          // faults are left alone: every endpoint would repeat them.
+          const bodyError = nodeStateError(response);
+          if (bodyError !== undefined) throw bodyError;
           const latencyMs = Date.now() - start;
           const slot = method === "getSlot" ? slotFromResponse(response) : undefined;
           this.healthMonitor.recordSuccess(name, latencyMs, slot);
@@ -283,6 +292,8 @@ export class ResilientRpcPool {
     const start = Date.now();
     try {
       const response = (await endpoint.transport({ payload: probePayload })) as JsonRpcResponse;
+      const bodyError = nodeStateError(response); // issue #19, on the probe path too
+      if (bodyError !== undefined) throw bodyError;
       const latencyMs = Date.now() - start;
       const slot = slotFromResponse(response);
       this.healthMonitor.recordSuccess(endpoint.name, latencyMs, slot);

@@ -23,7 +23,7 @@ export type { EndpointHealth, HealthMonitorConfig } from "./rpc/health.js";
 // Error-shape normalisation. Exported because every consumer writing their own
 // back-off needs to tell a 429 from anything else, and the status lives in a
 // different place depending on which layer threw (issue #16).
-export { httpStatusOf, isRateLimited, retryAfterMs } from "./rpc/http-status.js";
+export { httpStatusOf, isRateLimited, retryAfterMs, nodeStateError } from "./rpc/http-status.js";
 export { CreditRateLimiter, DEFAULT_METHOD_WEIGHTS } from "./rpc/rate-limit.js";
 export type { RateLimiterConfig } from "./rpc/rate-limit.js";
 export { ClusterDetector, CLUSTER_GENESIS_HASHES } from "./rpc/cluster.js";

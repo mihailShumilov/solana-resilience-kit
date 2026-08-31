@@ -41,7 +41,15 @@ describe("TransactionSender", () => {
       signature: "SigSend2",
       lastValidBlockHeight: 800n,
     });
-    expect(ep.lastSendParams?.maxRetries).toBe(0);
+    // The invariant is the VALUE — the RPC's generic retry is disabled — not
+    // which JS numeric type kit hands a custom transport. The sender sends
+    // `0n`; kit 6 coerces that to `0`, kit 7+ passes `0n` through, and BOTH
+    // serialize to the JSON number 0 on the wire (verified against 6.10.0 and
+    // 8.2.0 with a loopback server). `toBe(0)` pinned kit 6's coercion rather
+    // than our behaviour, which is what broke the peer matrix in #20.
+    const maxRetries = ep.lastSendParams?.maxRetries;
+    expect(maxRetries).toBeDefined();
+    expect(Number(maxRetries)).toBe(0);
   });
 
   it("returns expired for a dropped tx and stops at the deadline", async () => {
