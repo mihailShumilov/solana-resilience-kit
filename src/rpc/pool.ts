@@ -3,6 +3,7 @@
  * single `@solana/kit`-compatible RpcTransport that:
  *   - routes to the freshest healthy endpoint (via HealthMonitor),
  *   - fails over to the next endpoint on 429 / transport error,
+ *   - ejects an endpoint that keeps failing, so it costs zero traffic,
  *   - meters weighted credits to pre-empt 429s (CreditRateLimiter),
  *   - emits per-request metrics.
  *
@@ -14,8 +15,9 @@
 // emitted d.ts never references a package consumers can't resolve under pnpm's
 // strict node-linker (issue #8).
 import { createSolanaRpcFromTransport, type Rpc, type RpcTransport, type SolanaRpcApi } from "@solana/kit";
-import { AllEndpointsFailedError } from "../errors.js";
+import { AllEndpointsFailedError, EndpointEjectedError } from "../errors.js";
 import { HealthMonitor, type EndpointHealth } from "./health.js";
+import { isRateLimited } from "./http-status.js";
 import type { CreditRateLimiter } from "./rate-limit.js";
 import type { Metrics } from "../observability/metrics.js";
 import type { LifecycleEmitter } from "../events.js";
@@ -35,14 +37,8 @@ interface JsonRpcResponse {
   result: unknown;
 }
 
-/** True when an error is an HTTP 429 (rate-limit) carrying a numeric statusCode. */
-function isRateLimited(err: unknown): boolean {
-  return (
-    err !== null &&
-    typeof err === "object" &&
-    (err as { statusCode?: unknown }).statusCode === 429
-  );
-}
+/** Default gap between freshness probe rounds. */
+const DEFAULT_HEALTH_REFRESH_MS = 2_000;
 
 /** Best-effort human reason string for a failover event. */
 function errorMessage(err: unknown): string {
@@ -71,11 +67,19 @@ export interface ResilientRpcConfig {
   freshnessAware?: boolean;
   /** Send the same read to N endpoints and take the first response (default 1). */
   hedge?: number;
+  /**
+   * Minimum gap between freshness probe rounds (default 2000ms). Between
+   * rounds the last observed slot is reused, so probing costs one extra
+   * `getSlot` per endpoint per interval instead of one per logical request.
+   */
+  healthRefreshMs?: number;
   healthMonitor?: HealthMonitor;
   rateLimiter?: CreditRateLimiter;
   metrics?: Metrics;
   /** Optional typed lifecycle event stream (failover / health for dApp UIs). */
   events?: LifecycleEmitter;
+  /** Injected clock for the probe cadence (defaults to `Date.now`). */
+  now?: () => number;
 }
 
 export class ResilientRpcPool {
@@ -88,6 +92,10 @@ export class ResilientRpcPool {
   private readonly events?: LifecycleEmitter;
   private readonly freshnessAware: boolean;
   private readonly maxAttempts: number;
+  private readonly healthRefreshMs: number;
+  private readonly now: () => number;
+  /** Timestamp of the last freshness probe round; null = never probed. */
+  private lastProbeAt: number | null = null;
   /** Last-known health per endpoint, so we only emit `connection:health` on change. */
   private readonly lastHealthy = new Map<string, boolean>();
 
@@ -95,14 +103,16 @@ export class ResilientRpcPool {
     this.endpoints = config.endpoints;
     this.endpointNames = config.endpoints.map((e) => e.name);
     this.byName = new Map(config.endpoints.map((e) => [e.name, e]));
+    this.now = config.now ?? Date.now;
     this.healthMonitor =
       config.healthMonitor ??
-      new HealthMonitor({ endpointNames: this.endpointNames, maxSlotLag: 150n });
+      new HealthMonitor({ endpointNames: this.endpointNames, maxSlotLag: 150n, now: this.now });
     this.rateLimiter = config.rateLimiter;
     this.metrics = config.metrics;
     this.events = config.events;
     this.freshnessAware = config.freshnessAware ?? true;
     this.maxAttempts = config.maxAttempts ?? config.endpoints.length;
+    this.healthRefreshMs = config.healthRefreshMs ?? DEFAULT_HEALTH_REFRESH_MS;
     // Assume healthy at start so the first successful request is not noise; only
     // a genuine transition (ejection / recovery) emits a `connection:health`.
     for (const name of this.endpointNames) this.lastHealthy.set(name, true);
@@ -117,7 +127,8 @@ export class ResilientRpcPool {
       const payload = config.payload as JsonRpcPayload;
       const method = payload.method;
 
-      const order = await this.attemptOrder();
+      await this.refreshHealth();
+      const order = this.attemptOrder();
 
       const attempts: Array<{ endpoint: string; error: unknown }> = [];
       let used = 0;
@@ -126,6 +137,19 @@ export class ResilientRpcPool {
         if (used >= this.maxAttempts) break;
         const endpoint = this.byName.get(name);
         if (endpoint === undefined) continue;
+
+        // Circuit breaker (issue #17): an ejected endpoint is skipped with NO
+        // network call — the whole point is that a provider which is already
+        // rejecting us stops costing latency and quota. It is deliberately NOT
+        // recorded in the Metrics sink: we never contacted it, so counting it
+        // as a failed request would drag the reported success rate down for an
+        // endpoint that was never asked anything.
+        if (!this.healthMonitor.tryAdmit(name)) {
+          const until = this.healthMonitor.ejectedUntil(name);
+          attempts.push({ endpoint: name, error: new EndpointEjectedError(name, until) });
+          continue;
+        }
+
         used += 1;
 
         // Optional credit gating: a dry bucket is a soft failure — advance on.
@@ -182,19 +206,58 @@ export class ResilientRpcPool {
   }
 
   /**
-   * Builds the per-request attempt order. When freshness-aware, probe every
-   * endpoint's slot first so the HealthMonitor can rank fresh nodes ahead of
-   * laggards, then fall back to any configured endpoint not in the ranking
-   * (so unhealthy nodes stay as a last resort). Probe errors never escape.
+   * Probe round, run before each logical request but rate-limited by time.
    *
-   * NOTE: this minimal form double-counts getSlot traffic (one probe + one
-   * serve per logical request). A real deployment would gate probing behind a
-   * refresh interval; the contract only requires correct routing here.
+   * Two independent reasons to spend a `getSlot`:
+   *  - FRESHNESS: keep the slot ranking current. Gated by `healthRefreshMs`,
+   *    so a pool of 3 endpoints costs 3 probes per interval rather than 3 per
+   *    logical request (which was 4 requests of traffic per 1 of work).
+   *  - RECOVERY: an ejected endpoint whose cooldown just expired gets its one
+   *    half-open attempt here, because a probe is the cheapest possible way to
+   *    ask "are you back?" — and in config order (`freshnessAware: false`) a
+   *    degraded endpoint is ranked last, so it would otherwise never be
+   *    reached by a real request and could never recover.
+   *
+   * Probe errors never escape.
    */
-  private async attemptOrder(): Promise<string[]> {
-    if (!this.freshnessAware) return this.endpointNames;
+  private async refreshHealth(): Promise<void> {
+    const now = this.now();
+    const freshnessDue =
+      this.freshnessAware && (this.lastProbeAt === null || now - this.lastProbeAt >= this.healthRefreshMs);
 
-    await Promise.all(this.endpoints.map((e) => this.probe(e)));
+    const due: ResilientEndpoint[] = [];
+    for (const endpoint of this.endpoints) {
+      // The breaker gates dialling: false while the window is open, and it
+      // spends the single half-open attempt when the window has just expired.
+      if (!this.healthMonitor.tryAdmit(endpoint.name)) continue;
+      // A window that is still set means we just spent that half-open attempt,
+      // so this endpoint is mid-recovery and the probe is what checks on it.
+      const recovering = this.healthMonitor.ejectedUntil(endpoint.name) !== null;
+      if (freshnessDue || recovering) due.push(endpoint);
+    }
+
+    if (freshnessDue) this.lastProbeAt = now;
+    if (due.length === 0) return;
+    await Promise.all(due.map((e) => this.probe(e)));
+  }
+
+  /**
+   * Builds the per-request attempt order. Health is respected in BOTH modes
+   * (issue #17): an endpoint that has been failing is ranked behind the ones
+   * that have not, instead of being attempted first forever because it happens
+   * to be listed first. Config order is preserved within each group, and
+   * degraded endpoints stay in the list as a last resort rather than being
+   * dropped, so a fully-degraded pool still tries something.
+   */
+  private attemptOrder(): string[] {
+    if (!this.freshnessAware) {
+      const healthy: string[] = [];
+      const degraded: string[] = [];
+      for (const name of this.endpointNames) {
+        (this.healthMonitor.isHealthy(name) ? healthy : degraded).push(name);
+      }
+      return [...healthy, ...degraded];
+    }
 
     const ranked = this.healthMonitor.rankByFreshness();
     if (ranked.length === 0) return this.endpointNames;

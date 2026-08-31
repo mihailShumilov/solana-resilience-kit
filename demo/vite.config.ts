@@ -34,14 +34,15 @@ function serveTypedoc(): Plugin {
 // allowed to read the repository root. Vite/esbuild resolve the SDK's `.js`
 // relative imports to their `.ts` sources automatically.
 //
-// The SDK source imports `@solana/kit` and `@opentelemetry/api` as bare
-// specifiers. Node resolves those from the *importer* (../src), i.e. the repo
-// root's node_modules — which means a deploy that only installs this package
-// (Cloudflare with root directory = demo) wouldn't find them. We declare them as
-// this package's own dependencies and alias the bare specifiers to this
-// package's node_modules so the demo is fully self-contained. The alias targets
-// the package *directory* (not a file) so Vite still applies the `browser`
-// export condition (@solana/kit ships a dedicated browser build).
+// The SDK source imports `@solana/kit` as a bare specifier. Node resolves that
+// from the *importer* (../src), i.e. the repo root's node_modules — which means
+// a deploy that only installs this package (Cloudflare with root directory =
+// demo) wouldn't find it. We declare it as this package's own dependency and
+// alias the bare specifier to this package's node_modules so the demo is fully
+// self-contained. (`@opentelemetry/api` is aliased too, for demo code that
+// registers a MeterProvider — the SDK itself no longer imports it; see #15.)
+// The alias targets the package *directory* (not a file) so Vite still applies
+// the `browser` export condition (@solana/kit ships a dedicated browser build).
 const demoModule = (name: string) =>
   fileURLToPath(new URL(`./node_modules/${name}`, import.meta.url));
 

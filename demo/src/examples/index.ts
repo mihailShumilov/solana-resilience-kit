@@ -14,6 +14,8 @@ import { run as blockhashExpiry } from "./blockhash-expiry.js";
 import blockhashExpirySrc from "./blockhash-expiry.ts?raw";
 import { run as freshnessRouting } from "./freshness-routing.js";
 import freshnessRoutingSrc from "./freshness-routing.ts?raw";
+import { run as endpointEjection } from "./endpoint-ejection.js";
+import endpointEjectionSrc from "./endpoint-ejection.ts?raw";
 import { run as jitoFallback } from "./jito-fallback.js";
 import jitoFallbackSrc from "./jito-fallback.ts?raw";
 import { run as feeEstimation } from "./fee-estimation.js";
@@ -81,6 +83,15 @@ export const EXAMPLES: Example[] = [
       "A lagging RPC answers fine but is hundreds of slots behind — a silent tx killer. The HealthMonitor probes every node's slot and routes around the laggard, even when it's listed first.",
     code: freshnessRoutingSrc,
     run: freshnessRouting,
+  },
+  {
+    id: "endpoint-ejection",
+    title: "Endpoint ejection",
+    tag: "rpc · circuit breaker",
+    description:
+      "A provider's quota runs out and it 429s everything. After three strikes the pool opens the circuit and skips it with no network call at all, then half-opens once the cooldown expires. Skips never reach the Metrics sink, so they can't drag your success rate down.",
+    code: endpointEjectionSrc,
+    run: endpointEjection,
   },
   {
     id: "jito-fallback",

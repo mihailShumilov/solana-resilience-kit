@@ -31,6 +31,21 @@ export class AllEndpointsFailedError extends SdkError {
   }
 }
 
+/**
+ * The pool skipped an endpoint because its circuit is open: it had already
+ * tripped `failureThreshold`, so contacting it again before the cooldown
+ * expires would only cost latency and quota (issue #17). No network call was
+ * made, and no request was recorded against the endpoint.
+ */
+export class EndpointEjectedError extends SdkError {
+  constructor(
+    readonly endpoint: string,
+    readonly ejectedUntil: number | null,
+  ) {
+    super(`endpoint ${endpoint} is ejected from rotation`);
+  }
+}
+
 /** A Jito bundle did not land before its deadline; caller should fall back. */
 export class BundleNotLandedError extends SdkError {
   constructor(readonly bundleId: string) {
