@@ -22,6 +22,7 @@ const SCENARIOS: { id: Scenario; label: string }[] = [
   { id: "drop", label: "drop" },
   { id: "429", label: "429" },
   { id: "lag", label: "lag" },
+  { id: "behind", label: "behind" },
   { id: "jito-fail", label: "jito-fail" },
   { id: "congestion", label: "congestion" },
 ];
@@ -67,7 +68,7 @@ export function App() {
         <div className="brand">
           <span className="dot" />
           <h1>RPC Resilience Lab</h1>
-          <span className="tag">solana-resilience-kit · live</span>
+          <span className="tag">solana-resilience-kit · v{__SDK_VERSION__}</span>
         </div>
         <div className="topbar-right">
           {labView && <NetworkSwitch network={state.network} disabled={state.running} onChange={(n) => lab.setNetwork(n)} />}

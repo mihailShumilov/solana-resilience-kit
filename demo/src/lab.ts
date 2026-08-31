@@ -41,7 +41,7 @@ import type { VersionedTransaction } from "@solana/web3.js";
 import { buildTransfer, bytesToBase64 } from "./txbuild.js";
 
 export type Network = "sim" | "devnet";
-export type Scenario = "healthy" | "drop" | "429" | "lag" | "jito-fail" | "congestion";
+export type Scenario = "healthy" | "drop" | "429" | "lag" | "behind" | "jito-fail" | "congestion";
 
 export type StepStatus = "idle" | "active" | "done" | "failed" | "skipped";
 export type StepId = "submit" | "route" | "pin" | "bundle" | "broadcast" | "rebroadcast" | "confirm" | "outcome";
@@ -140,6 +140,12 @@ const SCENARIO_FAULTS: Record<Scenario, EndpointFaultProfile[]> = {
   drop: [{ dropRate: 1 }, { dropRate: 1 }, { dropRate: 1 }],
   "429": [{ rate429Rate: 1 }, {}, {}],
   lag: [{ slotLag: 420 }, {}, {}],
+  // HTTP 200 with a JSON-RPC error body — the failure that looks like success.
+  behind: [
+    { jsonRpcError: { code: -32005, message: "Node is unhealthy; behind by 1500 slots" } },
+    {},
+    {},
+  ],
   "jito-fail": [{}, {}, {}],
   congestion: [
     { latencyMs: [220, 640], rate429Rate: 0.6 },
@@ -172,6 +178,15 @@ export const SCENARIO_INFO: Record<Scenario, ScenarioInfo> = {
     fault: "The primary node is 420 slots behind the cluster (a stale/lagging RPC).",
     without: "A naive client may fetch a blockhash from — or send to — the stale node, risking a silently dropped transaction.",
     withKit: "HealthMonitor ranks endpoints by slot freshness, flags the laggard, and routes to an up-to-date node (see the degraded card).",
+  },
+  behind: {
+    id: "behind",
+    fault:
+      "The primary node answers HTTP 200 — but the payload is a JSON-RPC error: \"Node is unhealthy; behind by 1500 slots\".",
+    without:
+      "Nothing threw at the transport layer, so a naive client treats the response as a normal result and only discovers the error at the API boundary — pinned to a node that already said it cannot serve.",
+    withKit:
+      "The pool inspects the response body, treats a node-state code as a real failure, fails over to a healthy node, and records the failure so the laggard can be ejected. Caller faults like invalid params are deliberately left alone.",
   },
   "jito-fail": {
     id: "jito-fail",
